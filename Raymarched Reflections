@@ -1,0 +1,240 @@
+//
+/* https://www.shadertoy.com/view/4dt3zn
+	----------------------
+  光线行进反射（Raymarched Reflections）
+  非常基本的演示，在一个带反射和合理的阴影的距离场中进行光线行进，没有切边（cutting edge），不过对刚入门的人来说够了。
+  
+  反射很简单：行进到碰撞点，在该点获取颜色。从碰撞点沿反射光方向继续下去，直到碰到一个新的碰撞点，继续获取颜色，然后添加一份（portion）
+  到一开始的颜色，重复此过程。
+  
+  别的工作会使速度慢下来，尤其是应用阴影的时候——这可能是你没有看到太多阴影和反射实例的原因，但是对于简单的距离场来说，还是可行的。
+  这样做很诱人，不过我弄了一个更简单，更有教育意义的示例，以后会有更好的。
+
+    // 反射简单示例:
+    https://www.shadertoy.com/view/MsfGzr
+    https://www.shadertoy.com/view/Xdj3Dt
+    Glass Polyhedron - Nrx
+    https://www.shadertoy.com/view/4slSzj
+
+*/
+
+#define FAR 30.
+
+//距离函数，这个特简单，我选了圆球状盒子，因为实现起来代价很低，显示反射光也不错
+float map(vec3 p)
+{
+    //将示例中的圆角立方体稍微偏离中心，来稍微分散空间
+    // "floor(p)"代表每个方块的id（基于其位置推定），获取这个数然后给一个随机的3D偏移，然后将其添加到一个有规律的位置，很简单
+    float n = sin(dot(floor(p), vec3(27, 113, 57)));
+    vec3 rnd = fract(vec3(2097152, 262144, 32768)*n)*.16 - .08;
+    
+    //重复计算这个因子，如果你不喜欢不正常的东西，可以丢掉“rnd”，来让物体线性排列
+    p = fract(p + rnd) - .5;
+    
+    //圆角形的盒子。下面是制作过程，用方盒减去一些球面度，就是个圆角方盒了
+    p = abs(p); 
+    return max(p.x, max(p.y, p.z)) - 0.25 + dot(p, p)*0.5;
+    
+    //return length(p) - 0.225; // 这样只是圆球
+}
+
+// 标准光线行进
+float trace(vec3 ro, vec3 rd){
+   
+    float t = 0., d;
+    
+    for (int i = 0; i < 96; i++){
+
+        d = map(ro + rd*t);
+        
+        //使用"abs"换取更好的精确度
+        if(abs(d)<.001 || t>FAR) break;        
+        
+        t += d*.75;  // 在第一步中使用更高的精确度
+    }
+    
+    return t;
+}
+
+// 第二步，也是唯一的反射弹跳，和上面一样，但是迭代更少，准确度更低（96变成48）
+// 采用几乎相同的函数是因为光线行进是个很昂贵的操作，既然反射光不需要那么多细节，就不用在意那么多
+float traceRef(vec3 ro, vec3 rd){
+    
+    float t = 0., d;
+    
+    for (int i = 0; i < 48; i++){
+
+        d = map(ro + rd*t);
+        
+        if(abs(d)<.002 || t>FAR) break;
+        
+        t += d;
+    }
+    
+    return t;
+}
+
+
+//很难得到廉价的阴影，实际上，如果没搞错，我觉得给复制的对象制造阴影，限定其迭代是不可能的
+float softShadow(vec3 ro, vec3 lp, float k){
+
+    //多多益善，但是不一定负担得起……在我的渣机上是不行的
+    const int maxIterationsShad = 24; 
+    
+    vec3 rd = (lp-ro); // 未归一化的直射光
+
+    float shade = 1.;
+    float dist = .0035;    
+    float end = max(length(rd), .001);
+    float stepDist = end/float(maxIterationsShad);
+    
+    rd /= end;
+
+    //最多的阴影迭代，迭代次数越多，阴影效果越好，速度越慢，很显然，要在最少迭代次数和最好阴影效果间权衡
+    for (int i=0; i<maxIterationsShad; i++){
+
+        float h = map(ro + rd*dist);
+        //shade = min(shade, k*h/dist);
+        shade = min(shade, smoothstep(0., 1., k*h/dist)); // Subtle difference. Thanks to IQ for this tidbit.
+        // 选项很多，没一个是完美的: dist += min(h, .2), dist += clamp(h, .01, .2), clamp(h, .02, stepDist*2.), etc.
+        dist += clamp(h, .02, .25);
+        
+        // 应该提前结束距离累积函数，如果你准备建立更多实例的话
+        if (h<0. || dist > end) break; 
+    }
+
+    //我给最后的阴影值加了0.5，让阴影变亮了一些
+    // Really dark shadows look too brutal to me.
+    return min(max(shade, 0.) + .25, 1.); 
+}
+
+/*
+// 标准归一化函数，不像四面体网格计算那么快，但是更加对称，由于这个场景本身的复杂性，所以要减弱锯齿效果
+vec3 getNormal(in vec3 p) {
+	const vec2 e = vec2(.002, 0);
+	return normalize(vec3(map(p + e.xyy) - map(p - e.xyy), map(p + e.yxy) - map(p - e.yxy),	map(p + e.yyx) - map(p - e.yyx)));
+}
+*/
+
+// 四面体归一化，保存几个map函数的调用
+vec3 getNormal( in vec3 p ){
+    //注意，这里稍稍提高了采样距离，以缓解碰撞点不准确导致的伪影
+    vec2 e = vec2(.0025, -.0025); 
+    return normalize(
+        e.xyy * map(p + e.xyy) + 
+        e.yyx * map(p + e.yyx) + 
+        e.yxy * map(p + e.yxy) + 
+        e.xxx * map(p + e.xxx));
+}
+
+// 以3D方格排列交替显示方块颜色，如果你想可以返回单个颜色，但是我觉得应该做点混合
+// 颜色模式受此影响：https://www.shadertoy.com/view/Ml2XWt
+vec3 getObjectColor(vec3 p){    
+    vec3 col = vec3(1);
+    
+    // "floor(p)" 类似于id一样的角色，基于方块位置
+    // 可以分布执行，但是这样更直观
+    if(fract(dot(floor(p), vec3(.5))) > .001) 
+        col = vec3(.6, .3, 1.);
+    
+    return col;
+    
+}
+
+//使用碰撞点，单位向量光来为场景着色，还有漫射光，镜面光，散射光，等等，很标准的实现
+vec3 doColor(in vec3 sp, in vec3 rd, in vec3 sn, in vec3 lp, float t){
+    
+    vec3 ld = lp-sp; // 光线向量
+    float lDist = max(length(ld), .001); // 光线到表面距离
+    ld /= lDist; // 归一化光线向量
+    
+    // 根据距离削弱光线
+    float atten = 1. / (1. + lDist*.2 + lDist*lDist*.1);
+    
+    // 标准散射光
+    float diff = max(dot(sn, ld), 0.);
+    // 标准镜面反射光
+    float spec = pow(max( dot( reflect(-ld, sn), -rd ), 0.), 8.);
+    
+    // 为物体着色，可以再简单一些
+    vec3 objCol = getObjectColor(sp);
+    
+    // 联立以上变量确定最终光照着色
+    vec3 sceneCol = (objCol*(diff + .15) + vec3(1., .6, .2)*spec*2.) * atten;    
+    
+    // 雾气因数，由到照相机的距离决定
+    float fogF = smoothstep(0., .95, t/FAR);
+   
+    // 应用背景雾气，在这里是黑的，但是也可以渲染天空之类
+    sceneCol = mix(sceneCol, vec3(0), fogF); 
+    
+    //返回颜色，每次渲染（pass）都执行一次，在这里只有两种颜色
+    return sceneCol;
+    
+}
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord ){
+
+    // 屏幕坐标
+	  vec2 uv = (fragCoord.xy - iResolution.xy*.5) / iResolution.y;
+    
+    // 单位向量
+    vec3 rd = normalize(vec3(uv, 1.));    
+
+    // 一个廉价，常用的照相机运动，我都用烦了
+    float cs = cos(iTime * .25), si = sin(iTime * .25);
+    rd.xy = mat2(cs, si, -si, cs)*rd.xy;
+    rd.xz = mat2(cs, si, -si, cs)*rd.xz;
+    
+    //光线的起点，在这里作为表面位置加倍过，可能会造成迷惑
+    vec3 ro = vec3(0., 0., iTime*1.5);
+    
+    //光照位置，放在起点周围
+    vec3 lp = ro + vec3(0., 1., -.5);    
+    
+    // 光线第一次通过    
+    float t = trace(ro, rd);      
+    
+    // 把光线起点 "ro" 改到新的碰撞点
+    ro += rd*t;
+    
+    //碰撞点重新进行归一化
+    vec3 sn = getNormal(ro);
+    
+    //碰撞点重新着色，说实话，重用光线起点，描述表面碰撞点有点迷，这么做的理由是因为反射光会从这个碰撞点按照本来的方向射出
+    //也就是说碰撞点就是新的光照起点，查看下方的traceRef方法
+    vec3 sceneColor = doColor(ro, rd, sn, lp, t);
+    
+    //检查表面是否在阴影内，理想状况下还可以检查反射面是不是在阴影内，不过阴影代价很高，所以只在第一次光线通过时执行，
+    //如果这时暂停检查反射，就会发现它们其实并没有影子
+    float sh = softShadow(ro, lp, 16.);
+    
+    
+    // 第二次通过——反射光线
+    //标准的反射光，只是相交表面的单位向量反射，在表面使用归一化实现
+    rd = reflect(rd, sn);    
+    
+    //反射光通路从第一道光线的终点也是碰撞点开始，在少数情况下会在后裁剪面之外，出于简化，没有碰撞点也可以算出反射光通路
+    //光线的新方向很显然是反射光方向，见上。对于新手而言，不要忘了将光线从初始表面点移开一点，否则就会和刚才碰撞的表面相交
+    t = traceRef(ro +  rd*.01, rd);
+    
+    //把光线起点"ro" 改成新的反射碰撞点
+    ro += rd*t;
+    
+    //碰撞点重新归一化
+    sn = getNormal(ro);
+    
+    //反射后的碰撞点着色，将其一部分添加到最后的颜色中，我简单地使用了0.35做因子
+    sceneColor += doColor(ro, rd, sn, lp, t)*.35;
+    //其他联立，取决于你想要什么效果
+    //sceneColor = sceneColor*.7 + doColor(ro, rd, sn, lp, t)*.5;
+    
+    
+    // 应用阴影
+    //最终的颜色乘以第一道通路的阴影，理论上可以用来检查反射点是不是在阴影里，不过这里不重要
+    //这样环境光会让它更好看点，但是我们正在保存循环，和简化编写
+    sceneColor *= sh;
+    
+    固定最终颜色，执行一些粗糙的伽马校正（sqrt），然后显示到屏幕
+	  fragColor = vec4(sqrt(clamp(sceneColor, 0., 1.)), 1);
+}
