@@ -1,0 +1,135 @@
+//玻尔兹曼格子法流体模拟
+//Buffer A
+#define R iResolution.xy
+#define T(U) texture(iChannel0,(U)/R)
+#define D(U) texture(iChannel1,(U)/R)
+#define B(U) texture(iChannel2,(U)/R)
+// 流动速度
+vec2 v (vec4 b) {
+	return vec2(b.x-b.y,b.z-b.w);
+}
+// 压力
+float p (vec4 b) {
+	return 0.25*(b.x+b.y+b.z+b.w);
+}
+//以速度变换坐标并查找状态
+vec4 A(vec2 U) {
+    U-=.5*v(T(U));
+    U-=.5*v(T(U));
+	return T(U);
+}
+void mainImage(out vec4 Q, in vec2 U)
+{
+    // 某像素点
+    Q = A(U);
+    // 附近像素点
+    vec4 
+        n = A(U+vec2(0,1)),
+        e = A(U+vec2(1,0)),
+        s = A(U-vec2(0,1)),
+        w = A(U-vec2(1,0));
+    // 压力渐变
+    float px = 0.25*(p(e)-p(w));
+    float py = 0.25*(p(n)-p(s)); 
+    
+    // 边界能量交换输入 :   
+    Q += 0.25*(n.w + e.y + s.z + w.x)
+        	// 边界能量交换输出 :
+        	-p(Q)
+        	// dV/dt = dP/dx,  dEnergy In dTime = dEnergy in dSpace
+        	-vec4(px,-px,py,-py);
+    
+    // 图片缓冲获取值
+    float z = .8-length(B(U).xyz);
+    // 一些黏糊糊的东西
+    Q = mix(mix(Q,0.25*(n+e+s+w),.01),vec4(p(Q)),.01*(1.-z));
+    // 重力势能
+    Q.zw -= 0.001*z*vec2(1,-1);
+    // 初始无速度，有一定压力
+    if (iFrame < 1||(iMouse.z>0.&&length(U-iMouse.xy)<R.y/5.)) Q = vec4(.2);
+    // 边界上，所有动能都转化成势能
+    if(U.x<3.||R.x-U.x<3.||U.y<3.||R.y-U.y<3.)Q = vec4(p(Q));
+}
+
+//Buffer D
+//用v(A(coord))进行局部场变换, 用FragCoord初始化
+#define R iResolution.xy
+#define A(U) texture(iChannel0,(U)/R)
+#define d(U) texture(iChannel1,(U)/R)
+#define C(U) texture(iChannel2,(U)/R)
+vec2 v (vec4 b) {
+	return vec2(b.x-b.y,b.z-b.w);
+}
+vec4 D(vec2 U) {
+    U-=.5*v(A(U));
+    U-=.5*v(A(U));
+	return d(U);
+}
+void mainImage( out vec4 Q, in vec2  U)
+{
+    Q = D(U);
+    
+    vec4 
+        q = A(U),
+        n = A(U+vec2(0,1)),
+        e = A(U+vec2(1,0)),
+        s = A(U-vec2(0,1)),
+        w = A(U-vec2(1,0)),
+        N = D(U+vec2(0,1)),
+        E = D(U+vec2(1,0)),
+        S = D(U-vec2(0,1)),
+        W = D(U-vec2(1,0));
+    Q += 0.25*((n.w-q.z)*(N-Q) + (e.y-q.x)*(E-Q) + (s.z-q.w)*(S-Q) + (w.x-q.y)*(W-Q));
+    
+    if (iFrame < 1||(iMouse.z>0.&&length(U-iMouse.xy)<R.y/5.)) Q = vec4(U,0,0);
+}
+
+//从BUFFER D的位置中寻找图像
+//Buffer B
+#define R iResolution.xy
+#define T(U) texture(iChannel0,(U)/R)
+#define D(U) texture(iChannel1,(U)/R)
+void mainImage( out vec4 Q, vec2 U )
+{
+    Q = texture(iChannel2,D(U).xy/R);
+}
+
+// Buffer B上发光
+#define R iResolution.xy
+#define T(U) texture(iChannel0,(U)/R)
+
+void mainImage( out vec4 Q, vec2 U )
+{
+   Q =  1.2-2.2*T(U);
+    Q.xyz = Q.xyz+.5*normalize(Q.xyz);
+   float
+       n = length(T(U+vec2(0,1))),
+       e = length(T(U+vec2(1,0))),
+       s = length(T(U-vec2(0,1))),
+       w = length(T(U-vec2(1,0)));
+    vec3 no = normalize(vec3(e-w,n-s,1));
+    float d = dot(reflect(no,vec3(0,0,1)),normalize(vec3(1)));
+    Q *= 8.*exp(-3.*d*d);
+}
+
+//镜头炫光效果
+//Image
+#define R iResolution.xy
+#define T(U) texture(iChannel0,(U)/R)
+vec4 F (vec2 U,vec2 r) {
+	vec4 t = T(U+r);
+    return exp(-.01*dot(r,r))*(exp(2.*t)-1.);
+}
+void mainImage( out vec4 Q, vec2 U )
+{
+   
+   Q = vec4(0);
+    for (float i = 0.; i < 7.; i+=1.1) {
+    	Q += F(U,+vec2(-i,i));
+    	Q += F(U,+vec2(i,i));
+    	Q += F(U,-vec2(-i,i));
+    	Q += F(U,-vec2(i,i));
+    }
+    Q = T(U)*0.15+ 1e-5*Q;
+    Q = atan(Q);
+}
